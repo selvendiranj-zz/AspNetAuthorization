@@ -5,8 +5,8 @@ using ContactManager.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Identity;
-using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Authorization;
 using Microsoft.EntityFrameworkCore;
@@ -18,14 +18,15 @@ namespace ContactManager
 {
     public class Startup
     {
+        private IConfiguration Configuration { get; }
+
+        private IHostingEnvironment Environment { get; }
+
         public Startup(IConfiguration configuration, IHostingEnvironment env)
         {
             Configuration = configuration;
             Environment = env;
         }
-
-        public IConfiguration Configuration { get; }
-        private IHostingEnvironment Environment { get; }
 
         public void ConfigureServices(IServiceCollection services)
         {
@@ -36,10 +37,23 @@ namespace ContactManager
                 .AddEntityFrameworkStores<ApplicationDbContext>()
                 .AddDefaultTokenProviders();
 
-            var skipHTTPS = Configuration.GetValue<bool>("LocalTest:skipHTTPS");
-            // requires using Microsoft.AspNetCore.Mvc;
-            services.Configure<MvcOptions>(options =>
+            services.AddSingleton<IEmailSender, EmailSender>();
+            services.AddSingleton<ISmsSender, AuthMessageSender>();
+
+            bool skipHTTPS = Configuration.GetValue<bool>("Ssl:Skip");
+
+            // requires:
+            // using Microsoft.AspNetCore.Authorization;
+            // using Microsoft.AspNetCore.Mvc.Authorization;
+            // using Microsoft.AspNetCore.Mvc;
+            services.AddMvc(options =>
             {
+                var policy = new AuthorizationPolicyBuilder()
+                                 .RequireAuthenticatedUser()
+                                 .Build();
+                options.Filters.Add(new AuthorizeFilter(policy));
+                options.SslPort = Configuration.GetValue<int>("Ssl:Port");
+
                 // Set LocalTest:skipHTTPS to true to skip SSL requrement in 
                 // debug mode. This is useful when not using Visual Studio.
                 if (Environment.IsDevelopment() && !skipHTTPS)
@@ -48,35 +62,38 @@ namespace ContactManager
                 }
             });
 
-            services.AddMvc();
             //.AddRazorPagesOptions(options =>
             //{
             //    options.Conventions.AuthorizeFolder("/Account/Manage");
             //    options.Conventions.AuthorizePage("/Account/Logout");
             //});
 
-            services.AddSingleton<IEmailSender, EmailSender>();
-            services.AddSingleton<ISmsSender, AuthMessageSender>();
-
-            // requires: using Microsoft.AspNetCore.Authorization;
-            //           using Microsoft.AspNetCore.Mvc.Authorization;
-            services.AddMvc(config =>
+            services.AddHsts(options =>
             {
-                var policy = new AuthorizationPolicyBuilder()
-                                 .RequireAuthenticatedUser()
-                                 .Build();
-                config.Filters.Add(new AuthorizeFilter(policy));
+                options.Preload = Configuration.GetValue<bool>("HstsOptions:Preload");
+                options.IncludeSubDomains = Configuration.GetValue<bool>("HstsOptions:IncludeSubDomains");
+                options.MaxAge = TimeSpan.FromDays(Configuration.GetValue<double>("HstsOptions:MaxAge"));
+                options.ExcludedHosts.Add(Configuration["HstsOptions:ExcludedHosts"]);
+            });
+
+            services.AddHttpsRedirection(options =>
+            {
+                options.RedirectStatusCode = StatusCodes.Status301MovedPermanently;
+                options.HttpsPort = Configuration.GetValue<int>("Ssl:Port");
+            });
+
+            services.AddAntiforgery(options =>
+            {
+                options.Cookie.Name = "_af";
+                options.Cookie.HttpOnly = true;
+                options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+                options.HeaderName = "X-XSRF-TOKEN";
             });
 
             // Authorization handlers.
-            services.AddScoped<IAuthorizationHandler,
-                                  ContactIsOwnerAuthorizationHandler>();
-
-            services.AddSingleton<IAuthorizationHandler,
-                                  ContactAdministratorsAuthorizationHandler>();
-
-            services.AddSingleton<IAuthorizationHandler,
-                                  ContactManagerAuthorizationHandler>();
+            services.AddScoped<IAuthorizationHandler, ContactIsOwnerAuthorizationHandler>();
+            services.AddSingleton<IAuthorizationHandler, ContactAdministratorsAuthorizationHandler>();
+            services.AddSingleton<IAuthorizationHandler, ContactManagerAuthorizationHandler>();
         }
 
         public void Configure(IApplicationBuilder app, IHostingEnvironment env)
@@ -90,10 +107,11 @@ namespace ContactManager
             else
             {
                 app.UseExceptionHandler("/Error");
+                app.UseHsts();
             }
 
+            app.UseHttpsRedirection();
             app.UseStaticFiles();
-
             app.UseAuthentication();
 
             app.UseMvcWithDefaultRoute();
